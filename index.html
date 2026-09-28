@@ -85,7 +85,7 @@
       -webkit-text-fill-color: transparent;
     }
 
-    .country {
+    .aircraft-info {
       color: var(--text-dim);
       font-size: 1rem;
       margin-top: 4px;
@@ -174,7 +174,7 @@
 
   <script>
     let isFetching = false;
-    let pollInterval = null;
+    let pollTimer = null;
 
     window.addEventListener('DOMContentLoaded', () => {
       if (!('geolocation' in navigator)) {
@@ -188,13 +188,13 @@
           const userLon = position.coords.longitude;
           updateStatus('Tracking Sky');
 
-          // Initial immediate fetch
+          // Initial fetch immediately
           fetchClosestPlane(userLat, userLon);
 
-          // Poll every 20 seconds to prevent rate limits
-          pollInterval = setInterval(() => {
+          // Refresh every 10 seconds (well within Airplanes.live community rate bounds)
+          pollTimer = setInterval(() => {
             fetchClosestPlane(userLat, userLon);
-          }, 20000);
+          }, 10000);
         },
         err => {
           renderError(`Location Error: ${err.message}. Please enable location permissions.`);
@@ -230,89 +230,73 @@
       `;
     }
 
-    async function fetchClosestPlane(lat, lon) {
+    async function fetchClosestPlane(userLat, userLon) {
       if (isFetching) return;
       isFetching = true;
 
-      // ~100–120km radius box
-      const boxSize = 1.0; 
-      const amin = (lat - boxSize).toFixed(4);
-      const amax = (lat + boxSize).toFixed(4);
-      const omin = (lon - boxSize).toFixed(4);
-      const omax = (lon + boxSize).toFixed(4);
-
-      const url = `https://opensky-network.org/api/states/all?lamin=${amin}&lmax=${amax}&lomin=${omin}&lomax=${omax}`;
+      // 60 Nautical Miles (~69 miles / 111 km radius around you)
+      const radiusNM = 60;
+      const url = `https://api.airplanes.live/v2/point/${userLat}/${userLon}/${radiusNM}`;
 
       try {
         const response = await fetch(url);
 
-        if (response.status === 429) {
-          updateStatus('Rate Limited (Retrying soon)', 'var(--warning)');
-          return;
-        }
-
         if (!response.ok) {
-          throw new Error(`OpenSky API Error: ${response.statusText || response.status}`);
+          throw new Error(`Airplanes API responded with status ${response.status}`);
         }
 
         const data = await response.json();
         updateStatus('Tracking Sky');
 
-        if (!data.states || data.states.length === 0) {
+        const aircraftList = data.ac || [];
+
+        // Filter out planes on ground or missing coordinates
+        const airbornePlanes = aircraftList.filter(ac => {
+          return ac.lat && ac.lon && ac.alt_baro !== 'ground' && ac.alt_baro !== null;
+        });
+
+        if (airbornePlanes.length === 0) {
           document.getElementById('content').innerHTML = `
             <div style="text-align: center; padding: 30px 0; color: var(--text-dim);">
               <h2>Clear Skies</h2>
-              <p style="margin-top:10px;">No planes airborne overhead right now.</p>
+              <p style="margin-top:10px;">No planes airborne overhead within 60 nautical miles.</p>
             </div>`;
           return;
         }
 
-        let closestPlane = null;
+        let closest = null;
         let minDistance = Infinity;
 
-        data.states.forEach(state => {
-          const pLon = state[5];
-          const pLat = state[6];
-          const baroAlt = state[7];
-          const onGround = state[8];
-
-          // Filter out grounded aircraft or records without coordinates
-          if (pLat != null && pLon != null && !onGround) {
-            const distKm = getHaversineDistance(lat, lon, pLat, pLon);
-            if (distKm < minDistance) {
-              minDistance = distKm;
-              closestPlane = {
-                icao24: state[0],
-                callsign: state[1] ? state[1].trim() : 'N/A',
-                country: state[2] || 'Unknown',
-                longitude: pLon,
-                latitude: pLat,
-                altitudeMeters: baroAlt || 0,
-                velocityMps: state[9] || 0,
-                heading: state[10] || 0,
-                vertRateMps: state[11] || 0,
-                horizontalDistKm: distKm
-              };
-            }
+        airbornePlanes.forEach(ac => {
+          const distKm = getHaversineDistance(userLat, userLon, ac.lat, ac.lon);
+          if (distKm < minDistance) {
+            minDistance = distKm;
+            closest = {
+              hex: ac.hex || 'Unknown',
+              callsign: (ac.flight || '').trim() || ac.r || ac.hex.toUpperCase(),
+              type: ac.t || 'Unknown Model',
+              reg: ac.r || '',
+              altitudeFeet: typeof ac.alt_baro === 'number' ? ac.alt_baro : 0,
+              speedKnots: ac.gs || 0,
+              heading: ac.track || 0,
+              vertRateFpm: ac.baro_rate || 0,
+              lat: ac.lat,
+              lon: ac.lon,
+              distKm: distKm
+            };
           }
         });
 
-        if (closestPlane) {
-          renderPlaneDetails(closestPlane, lat, lon);
-        } else {
-          document.getElementById('content').innerHTML = `
-            <div style="text-align: center; padding: 30px 0; color: var(--text-dim);">
-              <h2>Clear Skies</h2>
-              <p style="margin-top:10px;">No airborne planes within range.</p>
-            </div>`;
+        if (closest) {
+          renderPlaneDetails(closest, userLat, userLon);
         }
 
       } catch (err) {
-        // Only render full error if nothing is currently displayed
+        // If content is already showing a plane, gracefully show a status flicker instead of wiping out the screen
         if (document.getElementById('content').innerText.includes('Scanning')) {
-          renderError(err.message);
+          renderError(`Unable to fetch aircraft: ${err.message}`);
         } else {
-          updateStatus('API Offline / Waiting', 'var(--warning)');
+          updateStatus('API Connecting...', 'var(--warning)');
         }
       } finally {
         isFetching = false;
@@ -320,7 +304,7 @@
     }
 
     function getHaversineDistance(lat1, lon1, lat2, lon2) {
-      const R = 6371;
+      const R = 6371; // km
       const dLat = toRad(lat2 - lat1);
       const dLon = toRad(lon2 - lon1);
       const a = 
@@ -344,29 +328,28 @@
     }
 
     function renderPlaneDetails(plane, userLat, userLon) {
-      const horizMiles = (plane.horizontalDistKm * 0.621371).toFixed(1);
-      const altFeet = Math.round(plane.altitudeMeters * 3.28084);
-      const altMiles = (altFeet / 5280);
+      const horizMiles = (plane.distKm * 0.621371).toFixed(1);
+      const altMiles = (plane.altitudeFeet / 5280);
       const slantMiles = Math.sqrt(Math.pow(parseFloat(horizMiles), 2) + Math.pow(altMiles, 2)).toFixed(1);
       
-      const speedMph = Math.round(plane.velocityMps * 2.23694);
-      const vertSpeedFpm = Math.round(plane.vertRateMps * 196.85);
+      const speedMph = Math.round(plane.speedKnots * 1.15078);
+      const vertSpeedFpm = Math.round(plane.vertRateFpm);
 
       let vertStatus = "Cruising Level";
       if (vertSpeedFpm > 150) vertStatus = `Climbing (${vertSpeedFpm} ft/min)`;
       if (vertSpeedFpm < -150) vertStatus = `Descending (${vertSpeedFpm} ft/min)`;
 
       const compassHeading = getCompassDirection(plane.heading);
-      const lookDirection = getCompassDirection(calculateBearing(userLat, userLon, plane.latitude, plane.longitude));
+      const lookDirection = getCompassDirection(calculateBearing(userLat, userLon, plane.lat, plane.lon));
 
       document.getElementById('content').innerHTML = `
         <div class="flight-header">
-          <div class="callsign">${plane.callsign !== 'N/A' ? plane.callsign : 'ICAO: ' + plane.icao24.toUpperCase()}</div>
-          <div class="country">Origin: ${plane.country}</div>
+          <div class="callsign">${plane.callsign}</div>
+          <div class="aircraft-info">${plane.type} ${plane.reg ? '• ' + plane.reg : ''}</div>
         </div>
 
         <div class="primary-metric">
-          <div class="label">Direct Distance Away</div>
+          <div class="label">Direct 3D Distance Away</div>
           <div class="value">${slantMiles} mi</div>
         </div>
 
@@ -377,14 +360,14 @@
           </div>
           <div class="card">
             <div class="label">Altitude</div>
-            <div class="value">${altFeet.toLocaleString()} ft</div>
+            <div class="value">${plane.altitudeFeet.toLocaleString()} ft</div>
           </div>
           <div class="card">
-            <div class="label">Speed</div>
+            <div class="label">Ground Speed</div>
             <div class="value">${speedMph} mph</div>
           </div>
           <div class="card">
-            <div class="label">Heading</div>
+            <div class="label">Flight Heading</div>
             <div class="value">${compassHeading} (${Math.round(plane.heading)}°)</div>
           </div>
           <div class="card" style="grid-column: span 2;">
