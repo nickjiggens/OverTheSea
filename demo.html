@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Closest Overhead Plane</title>
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --card-bg: #151c2e;
+      --accent: #38ef7d;
+      --accent-alt: #11998e;
+      --text-main: #f0f4f8;
+      --text-dim: #8a99ad;
+      --danger: #ff4b4b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 30px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.05);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      background: rgba(255,255,255,0.05);
+      padding: 6px 12px;
+      border-radius: 20px;
+      color: var(--text-dim);
+      margin-bottom: 20px;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      background-color: var(--accent);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--accent);
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      50% { transform: scale(1.2); opacity: 1; }
+      100% { transform: scale(0.95); opacity: 0.8; }
+    }
+
+    .flight-header {
+      margin-bottom: 25px;
+    }
+
+    .callsign {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: 1px;
+      background: linear-gradient(135deg, #fff, var(--text-dim));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .country {
+      color: var(--text-dim);
+      font-size: 1rem;
+      margin-top: 4px;
+    }
+
+    .primary-metric {
+      background: linear-gradient(135deg, rgba(17, 153, 142, 0.2), rgba(56, 239, 125, 0.1));
+      border: 1px solid rgba(56, 239, 125, 0.3);
+      border-radius: 15px;
+      padding: 20px;
+      text-align: center;
+      margin-bottom: 25px;
+    }
+
+    .primary-metric .label {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--accent);
+    }
+
+    .primary-metric .value {
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-top: 5px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+    }
+
+    .card {
+      background: rgba(0,0,0,0.2);
+      padding: 15px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.03);
+    }
+
+    .card .label {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .card .value {
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .error-state {
+      text-align: center;
+      padding: 20px 0;
+      color: var(--danger);
+    }
+
+    .radar-icon {
+      font-size: 3rem;
+      margin-bottom: 10px;
+      display: inline-block;
+      animation: spin 4s linear infinite;
+    }
+
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div class="status-badge">
+      <div class="pulse-dot" id="dot"></div>
+      <span id="status-text">Acquiring Location...</span>
+    </div>
+
+    <div id="content">
+      <div style="text-align: center; padding: 40px 0;">
+        <div class="radar-icon">📡</div>
+        <p style="color: var(--text-dim)">Scanning the sky overhead...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // System auto-initializes on load without buttons
+    window.addEventListener('DOMContentLoaded', () => {
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          position => {
+            const userLat = position.coords.latitude;
+            const userLon = position.coords.longitude;
+            updateStatus('Tracking Sky');
+            
+            // Initial fetch + continuous tracking every 10 seconds
+            fetchClosestPlane(userLat, userLon);
+            setInterval(() => fetchClosestPlane(userLat, userLon), 10000);
+          },
+          err => {
+            renderError(`Location Error: ${err.message}. Please enable location permissions.`);
+          },
+          { enableHighAccuracy: true }
+        );
+      } else {
+        renderError("Geolocation is not supported by your browser.");
+      }
+    });
+
+    function updateStatus(text) {
+      document.getElementById('status-text').innerText = text;
+    }
+
+    function renderError(msg) {
+      document.getElementById('dot').style.backgroundColor = 'var(--danger)';
+      document.getElementById('dot').style.boxShadow = '0 0 10px var(--danger)';
+      document.getElementById('dot').style.animation = 'none';
+      updateStatus('Error');
+      document.getElementById('content').innerHTML = `
+        <div class="error-state">
+          <p>${msg}</p>
+        </div>
+      `;
+    }
+
+    async function fetchClosestPlane(lat, lon) {
+      // Create a ~250km bounding box around user position
+      const boxSize = 2.0; 
+      const amin = lat - boxSize;
+      const amax = lat + boxSize;
+      const omin = lon - boxSize;
+      const omax = lon + boxSize;
+
+      const url = `https://opensky-network.org/api/states/all?lamin=${amin}&lmax=${amax}&lomin=${omin}&lomax=${omax}`;
+
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Flight data API rate limited or offline.");
+        const data = await response.json();
+
+        if (!data.states || data.states.length === 0) {
+          document.getElementById('content').innerHTML = `
+            <div style="text-align: center; padding: 30px 0; color: var(--text-dim);">
+              <h2>Clear Skies</h2>
+              <p style="margin-top:10px;">No planes detected overhead right now.</p>
+            </div>`;
+          return;
+        }
+
+        // Parse planes and find the closest horizontal distance plane
+        let closestPlane = null;
+        let minDistance = Infinity;
+
+        data.states.forEach(state => {
+          const pLat = state[6];
+          const pLon = state[5];
+          const baroAlt = state[7]; // Altitude in meters
+
+          if (pLat && pLon) {
+            const distKm = getHaversineDistance(lat, lon, pLat, pLon);
+            if (distKm < minDistance) {
+              minDistance = distKm;
+              closestPlane = {
+                icao24: state[0],
+                callsign: state[1] ? state[1].trim() : 'N/A',
+                country: state[2] || 'Unknown',
+                longitude: pLon,
+                latitude: pLat,
+                altitudeMeters: baroAlt || 0,
+                velocityMps: state[9] || 0,
+                heading: state[10] || 0,
+                vertRateMps: state[11] || 0,
+                squawk: state[14] || 'N/A',
+                horizontalDistKm: distKm
+              };
+            }
+          }
+        });
+
+        if (closestPlane) {
+          renderPlaneDetails(closestPlane, lat, lon);
+        }
+
+      } catch (err) {
+        renderError(err.message);
+      }
+    }
+
+    // Haversine formula to compute distance in km over spherical Earth surface
+    function getHaversineDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371; // Earth's radius in km
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = 
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * 
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function toRad(degrees) {
+      return degrees * (Math.PI / 180);
+    }
+
+    function renderPlaneDetails(plane, userLat, userLon) {
+      // Conversions
+      const horizMiles = (plane.horizontalDistKm * 0.621371).toFixed(1);
+      const altFeet = Math.round(plane.altitudeMeters * 3.28084);
+      const altMiles = (altFeet / 5280);
+      
+      // Calculate true slant distance (3D hypotenuse)
+      const slantMiles = Math.sqrt(Math.pow(parseFloat(horizMiles), 2) + Math.pow(altMiles, 2)).toFixed(1);
+      
+      const speedMph = Math.round(plane.velocityMps * 2.23694);
+      const vertSpeedFpm = Math.round(plane.vertRateMps * 196.85);
+
+      let vertStatus = "Cruising Level";
+      if (vertSpeedFpm > 100) vertStatus = `Climbing (${vertSpeedFpm} ft/min)`;
+      if (vertSpeedFpm < -100) vertStatus = `Descending (${vertSpeedFpm} ft/min)`;
+
+      const compassHeading = getCompassDirection(plane.heading);
+
+      document.getElementById('content').innerHTML = `
+        <div class="flight-header">
+          <div class="callsign">${plane.callsign !== 'N/A' ? plane.callsign : 'ICAO: ' + plane.icao24.toUpperCase()}</div>
+          <div class="country">Origin Region: ${plane.country}</div>
+        </div>
+
+        <div class="primary-metric">
+          <div class="label">Direct 3D Distance Away</div>
+          <div class="value">${slantMiles} mi</div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <div class="label">Ground Distance</div>
+            <div class="value">${horizMiles} mi</div>
+          </div>
+          <div class="card">
+            <div class="label">Altitude (Vertical)</div>
+            <div class="value">${altFeet.toLocaleString()} ft</div>
+          </div>
+          <div class="card">
+            <div class="label">Speed</div>
+            <div class="value">${speedMph} mph</div>
+          </div>
+          <div class="card">
+            <div class="label">Heading</div>
+            <div class="value">${compassHeading} (${Math.round(plane.heading)}°)</div>
+          </div>
+          <div class="card" style="grid-column: span 2;">
+            <div class="label">Vertical Movement</div>
+            <div class="value">${vertStatus}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function getCompassDirection(heading) {
+      const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+      const index = Math.round(heading / 45) % 8;
+      return directions[index];
+    }
+  </script>
+</body>
+</html>
