@@ -13,6 +13,7 @@
       --text-main: #f0f4f8;
       --text-dim: #8a99ad;
       --danger: #ff4b4b;
+      --warning: #f1c40f;
     }
 
     * {
@@ -172,38 +173,56 @@
   </div>
 
   <script>
-    // System auto-initializes on load without buttons
+    let isFetching = false;
+    let pollInterval = null;
+
     window.addEventListener('DOMContentLoaded', () => {
-      if ('geolocation' in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          position => {
-            const userLat = position.coords.latitude;
-            const userLon = position.coords.longitude;
-            updateStatus('Tracking Sky');
-            
-            // Initial fetch + continuous tracking every 10 seconds
-            fetchClosestPlane(userLat, userLon);
-            setInterval(() => fetchClosestPlane(userLat, userLon), 10000);
-          },
-          err => {
-            renderError(`Location Error: ${err.message}. Please enable location permissions.`);
-          },
-          { enableHighAccuracy: true }
-        );
-      } else {
+      if (!('geolocation' in navigator)) {
         renderError("Geolocation is not supported by your browser.");
+        return;
       }
+
+      navigator.geolocation.getCurrentPosition(
+        position => {
+          const userLat = position.coords.latitude;
+          const userLon = position.coords.longitude;
+          updateStatus('Tracking Sky');
+
+          // Initial immediate fetch
+          fetchClosestPlane(userLat, userLon);
+
+          // Poll every 20 seconds to prevent rate limits
+          pollInterval = setInterval(() => {
+            fetchClosestPlane(userLat, userLon);
+          }, 20000);
+        },
+        err => {
+          renderError(`Location Error: ${err.message}. Please enable location permissions.`);
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
     });
 
-    function updateStatus(text) {
-      document.getElementById('status-text').innerText = text;
+    function updateStatus(text, color = null) {
+      const el = document.getElementById('status-text');
+      const dot = document.getElementById('dot');
+      el.innerText = text;
+      if (color) {
+        dot.style.backgroundColor = color;
+        dot.style.boxShadow = `0 0 10px ${color}`;
+      } else {
+        dot.style.backgroundColor = 'var(--accent)';
+        dot.style.boxShadow = '0 0 10px var(--accent)';
+        dot.style.animation = 'pulse 1.5s infinite';
+      }
     }
 
     function renderError(msg) {
-      document.getElementById('dot').style.backgroundColor = 'var(--danger)';
-      document.getElementById('dot').style.boxShadow = '0 0 10px var(--danger)';
-      document.getElementById('dot').style.animation = 'none';
-      updateStatus('Error');
+      const dot = document.getElementById('dot');
+      dot.style.backgroundColor = 'var(--danger)';
+      dot.style.boxShadow = '0 0 10px var(--danger)';
+      dot.style.animation = 'none';
+      updateStatus('Error', 'var(--danger)');
       document.getElementById('content').innerHTML = `
         <div class="error-state">
           <p>${msg}</p>
@@ -212,39 +231,53 @@
     }
 
     async function fetchClosestPlane(lat, lon) {
-      // Create a ~250km bounding box around user position
-      const boxSize = 2.0; 
-      const amin = lat - boxSize;
-      const amax = lat + boxSize;
-      const omin = lon - boxSize;
-      const omax = lon + boxSize;
+      if (isFetching) return;
+      isFetching = true;
+
+      // ~100–120km radius box
+      const boxSize = 1.0; 
+      const amin = (lat - boxSize).toFixed(4);
+      const amax = (lat + boxSize).toFixed(4);
+      const omin = (lon - boxSize).toFixed(4);
+      const omax = (lon + boxSize).toFixed(4);
 
       const url = `https://opensky-network.org/api/states/all?lamin=${amin}&lmax=${amax}&lomin=${omin}&lomax=${omax}`;
 
       try {
         const response = await fetch(url);
-        if (!response.ok) throw new Error("Flight data API rate limited or offline.");
+
+        if (response.status === 429) {
+          updateStatus('Rate Limited (Retrying soon)', 'var(--warning)');
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`OpenSky API Error: ${response.statusText || response.status}`);
+        }
+
         const data = await response.json();
+        updateStatus('Tracking Sky');
 
         if (!data.states || data.states.length === 0) {
           document.getElementById('content').innerHTML = `
             <div style="text-align: center; padding: 30px 0; color: var(--text-dim);">
               <h2>Clear Skies</h2>
-              <p style="margin-top:10px;">No planes detected overhead right now.</p>
+              <p style="margin-top:10px;">No planes airborne overhead right now.</p>
             </div>`;
           return;
         }
 
-        // Parse planes and find the closest horizontal distance plane
         let closestPlane = null;
         let minDistance = Infinity;
 
         data.states.forEach(state => {
-          const pLat = state[6];
           const pLon = state[5];
-          const baroAlt = state[7]; // Altitude in meters
+          const pLat = state[6];
+          const baroAlt = state[7];
+          const onGround = state[8];
 
-          if (pLat && pLon) {
+          // Filter out grounded aircraft or records without coordinates
+          if (pLat != null && pLon != null && !onGround) {
             const distKm = getHaversineDistance(lat, lon, pLat, pLon);
             if (distKm < minDistance) {
               minDistance = distKm;
@@ -258,7 +291,6 @@
                 velocityMps: state[9] || 0,
                 heading: state[10] || 0,
                 vertRateMps: state[11] || 0,
-                squawk: state[14] || 'N/A',
                 horizontalDistKm: distKm
               };
             }
@@ -267,16 +299,28 @@
 
         if (closestPlane) {
           renderPlaneDetails(closestPlane, lat, lon);
+        } else {
+          document.getElementById('content').innerHTML = `
+            <div style="text-align: center; padding: 30px 0; color: var(--text-dim);">
+              <h2>Clear Skies</h2>
+              <p style="margin-top:10px;">No airborne planes within range.</p>
+            </div>`;
         }
 
       } catch (err) {
-        renderError(err.message);
+        // Only render full error if nothing is currently displayed
+        if (document.getElementById('content').innerText.includes('Scanning')) {
+          renderError(err.message);
+        } else {
+          updateStatus('API Offline / Waiting', 'var(--warning)');
+        }
+      } finally {
+        isFetching = false;
       }
     }
 
-    // Haversine formula to compute distance in km over spherical Earth surface
     function getHaversineDistance(lat1, lon1, lat2, lon2) {
-      const R = 6371; // Earth's radius in km
+      const R = 6371;
       const dLat = toRad(lat2 - lat1);
       const dLon = toRad(lon2 - lon1);
       const a = 
@@ -287,46 +331,52 @@
       return R * c;
     }
 
+    function calculateBearing(lat1, lon1, lat2, lon2) {
+      const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+      const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+                Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+      const brng = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+      return brng;
+    }
+
     function toRad(degrees) {
       return degrees * (Math.PI / 180);
     }
 
     function renderPlaneDetails(plane, userLat, userLon) {
-      // Conversions
       const horizMiles = (plane.horizontalDistKm * 0.621371).toFixed(1);
       const altFeet = Math.round(plane.altitudeMeters * 3.28084);
       const altMiles = (altFeet / 5280);
-      
-      // Calculate true slant distance (3D hypotenuse)
       const slantMiles = Math.sqrt(Math.pow(parseFloat(horizMiles), 2) + Math.pow(altMiles, 2)).toFixed(1);
       
       const speedMph = Math.round(plane.velocityMps * 2.23694);
       const vertSpeedFpm = Math.round(plane.vertRateMps * 196.85);
 
       let vertStatus = "Cruising Level";
-      if (vertSpeedFpm > 100) vertStatus = `Climbing (${vertSpeedFpm} ft/min)`;
-      if (vertSpeedFpm < -100) vertStatus = `Descending (${vertSpeedFpm} ft/min)`;
+      if (vertSpeedFpm > 150) vertStatus = `Climbing (${vertSpeedFpm} ft/min)`;
+      if (vertSpeedFpm < -150) vertStatus = `Descending (${vertSpeedFpm} ft/min)`;
 
       const compassHeading = getCompassDirection(plane.heading);
+      const lookDirection = getCompassDirection(calculateBearing(userLat, userLon, plane.latitude, plane.longitude));
 
       document.getElementById('content').innerHTML = `
         <div class="flight-header">
           <div class="callsign">${plane.callsign !== 'N/A' ? plane.callsign : 'ICAO: ' + plane.icao24.toUpperCase()}</div>
-          <div class="country">Origin Region: ${plane.country}</div>
+          <div class="country">Origin: ${plane.country}</div>
         </div>
 
         <div class="primary-metric">
-          <div class="label">Direct 3D Distance Away</div>
+          <div class="label">Direct Distance Away</div>
           <div class="value">${slantMiles} mi</div>
         </div>
 
         <div class="grid">
           <div class="card">
-            <div class="label">Ground Distance</div>
-            <div class="value">${horizMiles} mi</div>
+            <div class="label">Look Toward</div>
+            <div class="value">${lookDirection}</div>
           </div>
           <div class="card">
-            <div class="label">Altitude (Vertical)</div>
+            <div class="label">Altitude</div>
             <div class="value">${altFeet.toLocaleString()} ft</div>
           </div>
           <div class="card">
@@ -338,7 +388,7 @@
             <div class="value">${compassHeading} (${Math.round(plane.heading)}°)</div>
           </div>
           <div class="card" style="grid-column: span 2;">
-            <div class="label">Vertical Movement</div>
+            <div class="label">Vertical Status</div>
             <div class="value">${vertStatus}</div>
           </div>
         </div>
